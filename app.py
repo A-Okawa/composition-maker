@@ -389,16 +389,24 @@ SERIES_COLORS = ["#257de0", "#f47230", "#00b894", "#f2a600", "#ee7fac", "#008a17
 INK, INK2, GRIDC = "#191919", "#666666", "#e3e3e3"
 
 
-def build_chart(spectra, q, excluded, stats=False, jp=False):
-    """元素ごとの棒グラフをPNG(bytes)で返す。q は "at" か "wt"。
+CHART_DEFAULTS = {
+    "font": "Arial", "fontsize": 10, "width_cm": 16.0, "height_cm": 9.0, "bar_width": 0.78,
+    "frame": False, "edge": False, "edge_color": "#000000", "grid": True, "legend": True,
+    "ymax": 0.0, "colors": [],
+}
+FONT_FALLBACK = ["Yu Gothic", "Meiryo", "Hiragino Sans", "Noto Sans CJK JP", "DejaVu Sans"]
+
+
+def chart_series(spectra, q, excluded, stats=False, jp=False):
+    """棒グラフの系列を作る。(元素の並び, [(名前, 値, 誤差)], 平均表示かどうか) を返す。
     スペクトルが2つ以上で stats=True、または9つ以上のときは平均±標準偏差の1系列にまとめる。"""
     lab = LABELS[jp]
     act = [{"name": s["name"], "c": compute(s["rows"], excluded)} for s in spectra]
     els = sorted({el for a in act for el in a["c"]}, key=lambda e: ZNUM.get(e, 999))
     if not act or not els:
-        return None
+        return [], [], False
     use_mean = len(act) >= 2 and (stats or len(act) > len(SERIES_COLORS))
-    series = []  # (名前, 値, 誤差)
+    series = []
     if use_mean:
         means, sds = [], []
         for el in els:
@@ -416,35 +424,59 @@ def build_chart(spectra, q, excluded, stats=False, jp=False):
                 err = [((a["c"].get(el) or {}).get("sig") or 0) for el in els]
             series.append((a["name"], vals, err))
     if not any(any(v) for _, v, _ in series):
-        return None
+        return [], [], False
+    return els, series, use_mean
 
-    plt.rcParams["font.family"] = ["Arial", "Yu Gothic", "Meiryo", "Hiragino Sans", "Noto Sans CJK JP", "DejaVu Sans"]
-    n, k = len(els), len(series)
-    fig, ax = plt.subplots(figsize=(min(12, max(4.5, 0.42 * n * max(1, k * 0.6) + 1.6)), 3.6), dpi=200)
-    group_w = 0.78
-    bw = group_w / k
-    for i, (name, vals, err) in enumerate(series):
-        xs = [j - group_w / 2 + bw * (i + 0.5) for j in range(n)]
-        ax.bar(xs, vals, width=bw * 0.9, color=SERIES_COLORS[i % len(SERIES_COLORS)], label=name, zorder=3,
-               yerr=err, error_kw={"ecolor": INK, "elinewidth": 0.8, "capsize": 2, "zorder": 4})
-    ax.set_xticks(range(n))
-    ax.set_xticklabels(els, color=INK, fontsize=10)
-    ax.set_ylabel(lab[q], color=INK, fontsize=10)
-    ax.set_ylim(bottom=0)
-    ax.margins(x=0.02)
-    ax.yaxis.grid(True, color=GRIDC, linewidth=0.8, zorder=0)
-    ax.set_axisbelow(True)
-    for side in ("top", "right", "left"):
-        ax.spines[side].set_visible(False)
-    ax.spines["bottom"].set_color(INK2)
-    ax.tick_params(axis="y", colors=INK2, length=0, labelsize=9)
-    ax.tick_params(axis="x", length=0)
-    if k > 1 or use_mean:
-        ax.legend(frameon=False, fontsize=9, labelcolor=INK, loc="upper right" if n > 6 else "best")
-    fig.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=300, facecolor="white")
-    plt.close(fig)
+
+def build_chart(spectra, q, excluded, stats=False, jp=False, opts=None, fmt="png", dpi=300):
+    """元素ごとの棒グラフを画像(bytes)で返す。q は "at" か "wt"、fmt は "png" か "tiff"。"""
+    o = dict(CHART_DEFAULTS, **(opts or {}))
+    lab = LABELS[jp]
+    els, series, use_mean = chart_series(spectra, q, excluded, stats, jp)
+    if not series:
+        return None
+    fs = o["fontsize"]
+    rc = {"font.family": [o["font"]] + FONT_FALLBACK, "font.size": fs, "axes.unicode_minus": False}
+    with plt.rc_context(rc):
+        n, k = len(els), len(series)
+        fig, ax = plt.subplots(figsize=(o["width_cm"] / 2.54, o["height_cm"] / 2.54), dpi=dpi)
+        group_w = o["bar_width"]
+        bw = group_w / k
+        for i, (name, vals, err) in enumerate(series):
+            color = o["colors"][i] if i < len(o["colors"]) else SERIES_COLORS[i % len(SERIES_COLORS)]
+            xs = [j - group_w / 2 + bw * (i + 0.5) for j in range(n)]
+            ax.bar(xs, vals, width=bw * (1.0 if o["edge"] else 0.9), color=color, label=name, zorder=3,
+                   edgecolor=o["edge_color"] if o["edge"] else "none", linewidth=0.6 if o["edge"] else 0,
+                   yerr=err, error_kw={"ecolor": INK, "elinewidth": 0.8, "capsize": 2, "zorder": 4})
+        ax.set_xticks(range(n))
+        ax.set_xticklabels(els, color="#000000", fontsize=fs)
+        ax.set_ylabel(lab[q], color="#000000", fontsize=fs)
+        ax.set_ylim(bottom=0, top=o["ymax"] if o["ymax"] and o["ymax"] > 0 else None)
+        ax.margins(x=0.02)
+        ax.yaxis.grid(bool(o["grid"]), color=GRIDC, linewidth=0.8, zorder=0)
+        ax.set_axisbelow(True)
+        if o["frame"]:  # 四辺を黒い枠線で囲み、目盛りを外向きに付ける
+            for side in ("top", "right", "left", "bottom"):
+                ax.spines[side].set_visible(True)
+                ax.spines[side].set_color("#000000")
+                ax.spines[side].set_linewidth(0.8)
+            ax.tick_params(axis="both", colors="#000000", length=3, width=0.8, direction="out", labelsize=fs - 1)
+            ax.tick_params(axis="x", labelsize=fs)
+        else:
+            for side in ("top", "right", "left"):
+                ax.spines[side].set_visible(False)
+            ax.spines["bottom"].set_color(INK2)
+            ax.tick_params(axis="y", colors=INK2, length=0, labelsize=fs - 1)
+            ax.tick_params(axis="x", length=0)
+        if o["legend"] and (k > 1 or use_mean):
+            ax.legend(frameon=False, fontsize=fs - 1, labelcolor="#000000", loc="upper right" if n > 6 else "best")
+        fig.tight_layout()
+        buf = io.BytesIO()
+        if fmt == "tiff":
+            fig.savefig(buf, format="tiff", dpi=dpi, facecolor="white", pil_kwargs={"compression": "tiff_lzw"})
+        else:
+            fig.savefig(buf, format="png", dpi=dpi, facecolor="white")
+        plt.close(fig)
     return buf.getvalue()
 
 
@@ -551,6 +583,21 @@ def main():
         chart_q = chart_qs[0] if chart_qs else None
         if show_chart and len(chart_qs) > 1:
             chart_q = st.radio("グラフの値", chart_qs, format_func=lambda q: {"at": "原子%", "wt": "質量%"}[q], horizontal=True)
+        copts = dict(CHART_DEFAULTS)
+        if show_chart:
+            with st.expander("グラフの調整"):
+                copts["font"] = st.selectbox("フォント", ["Arial", "Helvetica", "Times New Roman"])
+                copts["fontsize"] = st.number_input("文字サイズ (pt)", 5, 24, 10)
+                copts["width_cm"] = st.slider("幅 (cm)", 6.0, 30.0, 16.0, 0.5)
+                copts["height_cm"] = st.slider("高さ (cm)", 4.0, 20.0, 9.0, 0.5)
+                copts["bar_width"] = st.slider("棒の太さ", 0.2, 1.0, 0.78, 0.02)
+                copts["ymax"] = st.number_input("縦軸の最大値（0 で自動）", 0.0, 100.0, 0.0, 5.0)
+                copts["frame"] = st.toggle("枠線で囲む")
+                copts["edge"] = st.toggle("棒に縁取りを付ける")
+                if copts["edge"]:
+                    copts["edge_color"] = st.color_picker("縁取りの色", "#000000")
+                copts["grid"] = st.toggle("横の目盛線", value=True)
+                copts["legend"] = st.toggle("凡例を表示", value=True)
 
     with right:
         st.subheader("3. 貼り付け用の表")
@@ -600,14 +647,36 @@ def main():
             st.caption(" ".join(notes))
 
         if show_chart and chart_q:
-            png = build_chart(chosen, chart_q, excluded, stats, jp)
-            if png:
+            _, series, use_mean = chart_series(chosen, chart_q, excluded, stats, jp)
+            if series:
                 st.subheader("4. 棒グラフ")
-                st.image(png)
+                st.caption("棒の色")
+                pick_cols = st.columns(min(len(series), 4))
+                colors = []
+                for i, (name, _v, _e) in enumerate(series):
+                    with pick_cols[i % len(pick_cols)]:
+                        colors.append(st.color_picker(name, SERIES_COLORS[i % len(SERIES_COLORS)], key=f"bar_color_{i}"))
+                copts["colors"] = colors
+                st.image(build_chart(chosen, chart_q, excluded, stats, jp, copts, "png", 200))
                 st.caption("画像を右クリックして「画像をコピー」で Word や PowerPoint に貼り付けられます。"
-                           + ("誤差棒は標準偏差です。" if (len(chosen) >= 2 and (stats or len(chosen) > len(SERIES_COLORS))) else
-                              ("誤差棒は質量%のσです。" if chart_q == "wt" else "")))
-                st.download_button("グラフをPNGでダウンロード（300 dpi）", png, file_name="eds_bar.png", mime="image/png")
+                           + ("誤差棒は標準偏差です。" if use_mean else ("誤差棒は質量%のσです。" if chart_q == "wt" else "")))
+                c1, c2, c3 = st.columns([1, 1, 2])
+                fmt = c1.selectbox("保存形式", ["TIFF", "PNG"])
+                dpi = c2.selectbox("解像度 (dpi)", [300, 600, 1200], index=1)
+                with c3:
+                    st.write("")
+                    st.write("")
+                    if st.button("保存用の画像を作る"):
+                        data = build_chart(chosen, chart_q, excluded, stats, jp, copts, fmt.lower(), int(dpi))
+                        st.session_state["chart_file"] = (data, fmt, int(dpi))
+                saved = st.session_state.get("chart_file")
+                if saved:
+                    data, f_, d_ = saved
+                    ext = "tif" if f_ == "TIFF" else "png"
+                    st.download_button(f"{f_}（{d_} dpi、{len(data) / 1e6:.1f} MB）をダウンロード", data,
+                                       file_name=f"composition_bar_{d_}dpi.{ext}",
+                                       mime="image/tiff" if f_ == "TIFF" else "image/png")
+                    st.caption("設定を変えたあとは、もう一度「保存用の画像を作る」を押してください。")
 
         with st.expander("テキストでコピー（Excel用・タブ区切り）"):
             st.code(t["tsv"], language=None)
