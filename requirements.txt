@@ -1,3 +1,4 @@
 streamlit>=1.30
 pandas
 matplotlib>=3.6
+rapidocr-onnxruntime>=1.2.3

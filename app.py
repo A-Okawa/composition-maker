@@ -71,7 +71,7 @@ def is_wt(k):
 
 
 def is_at(k):
-    return ("原子" in k or bool(re.match(r"at(omic|om)?%", k))) and "%" in k
+    return ("原子" in k or bool(re.match(r"at(omic|om)?\W*%", k))) and "%" in k
 
 
 def is_total(k):
@@ -222,6 +222,25 @@ def decode_text(data):
         except UnicodeDecodeError:
             pass
     return data.decode("utf-8", errors="replace")
+
+
+IMAGE_EXT = ("jpg", "jpeg", "png", "bmp", "tif", "tiff")
+
+
+def load_image(name, data, engine=None):
+    """EPMA の出力画像 → ([{name, src, rows}], 警告のリスト)。"""
+    try:
+        import epma_image
+    except ImportError:
+        raise ValueError("画像の読み取りには rapidocr-onnxruntime が必要です（pip install -r requirements.txt を実行してください）")
+    try:
+        rows, warns = epma_image.image_to_rows(data, MASS, engine)
+    except ImportError:
+        raise ValueError("画像の読み取りには rapidocr-onnxruntime が必要です（pip install -r requirements.txt を実行してください）")
+    if not rows:
+        raise ValueError(warns[0] if warns else "画像から定量表を読み取れませんでした")
+    base = re.sub(r"\.[^.]+$", "", name)
+    return [{"name": base, "src": name + "（画像から読み取り）", "rows": rows}], warns
 
 
 def load_file(name, data):
@@ -519,23 +538,41 @@ document.getElementById("copy").addEventListener("click", async () => {
 """
 
 
+@st.cache_resource(show_spinner=False)
+def _ocr_engine():
+    from rapidocr_onnxruntime import RapidOCR
+    return RapidOCR()
+
+
+@st.cache_data(show_spinner="画像から定量表を読み取っています…")
+def _load_image_cached(name, data):
+    return load_image(name, data, _ocr_engine())
+
+
 def main():
-    st.set_page_config(page_title="EDS定量結果 整理ツール", layout="wide")
-    st.title("EDS定量結果 整理ツール")
-    st.caption("レポート（Word / txt）から元素・質量%・原子%だけを取り出し、Word や PowerPoint に表として貼り付けられます。")
+    st.set_page_config(page_title="composition-maker", layout="wide")
+    st.title("composition-maker（EDS・EPMA 定量結果の整理）")
+    st.caption("EDS のレポート（Word / txt）や EPMA の出力画像から元素・質量%・原子%だけを取り出し、Word や PowerPoint に貼り付けられる表と棒グラフにします。")
 
     left, right = st.columns([1, 2], gap="large")
 
     with left:
         st.subheader("1. 読み込み")
-        files = st.file_uploader("EDSレポート（複数可）", type=["docx", "txt", "csv", "tsv"], accept_multiple_files=True)
+        files = st.file_uploader("EDS レポート、EPMA の出力画像（複数可）", type=["docx", "txt", "csv", "tsv", *IMAGE_EXT],
+                                 accept_multiple_files=True)
         pasted = st.text_area("または、表やテキストをコピーして貼り付け", height=110,
                               placeholder="元素\tラインタイプ\t…\t質量%\t…\nO\tK シリーズ\t…\t22.12\t…")
 
-        spectra, errors = [], []
+        spectra, errors, n_img = [], [], 0
         for f in files or []:
             try:
-                spectra += load_file(f.name, f.getvalue())
+                if f.name.lower().rsplit(".", 1)[-1] in IMAGE_EXT:
+                    sp, warns = _load_image_cached(f.name, f.getvalue())
+                    spectra += sp
+                    n_img += 1
+                    errors += [f"{f.name}：{w}" for w in warns]
+                else:
+                    spectra += load_file(f.name, f.getvalue())
             except ValueError as e:
                 errors.append(f"{f.name}：{e}")
         if pasted.strip():
@@ -546,6 +583,9 @@ def main():
                 spectra.append({"name": s["title"] or f"貼り付け {i + 1}", "src": "貼り付け", "rows": s["rows"]})
         for e in errors:
             st.warning(e)
+        if n_img:
+            st.caption("画像は文字認識で読み取っています。合計と原子量による照合で誤りを検出しますが、"
+                       "使う前に元の画像の数値と見比べてください。")
 
         if spectra:
             st.subheader("読み込んだスペクトル")
